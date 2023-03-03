@@ -12,6 +12,7 @@ package eslgo
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"github.com/percipia/eslgo/command"
 	"net"
@@ -50,9 +51,15 @@ func (opts InboundOptions) Dial(address string) (*Conn, error) {
 		return nil, err
 	}
 	connection := newConnection(c, false, opts.Options)
-
+	connection.responseChanMutex.RLock()
+	responseChan, ok := connection.responseChannels[TypeAuthRequest]
+	connection.responseChanMutex.RUnlock()
+	if !ok {
+		connection.ExitAndClose()
+		return nil, errors.New("no auth request chan")
+	}
 	// First auth
-	<-connection.responseChannels[TypeAuthRequest]
+	<-responseChan
 	authCtx, cancel := context.WithTimeout(connection.runningContext, opts.AuthTimeout)
 	err = connection.doAuth(authCtx, command.Auth{Password: opts.Password})
 	cancel()
@@ -75,8 +82,15 @@ func (opts InboundOptions) Dial(address string) (*Conn, error) {
 }
 
 func (c *Conn) disconnectLoop(onDisconnect func()) {
+	c.responseChanMutex.RLock()
+	responseChan, ok := c.responseChannels[TypeDisconnect]
+	c.responseChanMutex.RUnlock()
+	if !ok {
+		c.ExitAndClose()
+		return
+	}
 	select {
-	case <-c.responseChannels[TypeDisconnect]:
+	case <-responseChan:
 		c.Close()
 		if onDisconnect != nil {
 			onDisconnect()
@@ -88,9 +102,16 @@ func (c *Conn) disconnectLoop(onDisconnect func()) {
 }
 
 func (c *Conn) authLoop(auth command.Auth, authTimeout time.Duration) {
+	c.responseChanMutex.RLock()
+	responseChan, ok := c.responseChannels[TypeAuthRequest]
+	c.responseChanMutex.RUnlock()
+	if !ok {
+		c.ExitAndClose()
+		return
+	}
 	for {
 		select {
-		case <-c.responseChannels[TypeAuthRequest]:
+		case <-responseChan:
 			authCtx, cancel := context.WithTimeout(c.runningContext, authTimeout)
 			err := c.doAuth(authCtx, auth)
 			cancel()
